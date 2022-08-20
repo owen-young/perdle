@@ -1,4 +1,5 @@
 from pywikiapi import wikipedia
+from SPARQLWrapper import SPARQLWrapper, JSON
 import requests
 import json
 from datetime import datetime
@@ -27,28 +28,31 @@ def test():
     response = requests.get("https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia.org/all-access/user/Tom_Brady/monthly/20220301/" + current_date, headers=req_headers)
     print(response.json())
 
+# Loop through all pages with Infobox and see if they're people using Dbpedia.
 def name_loop():
-    # Template for Wikipedia pages that I think all Wikipedia pages for people include. This
-    # may include animals as well, but I'll deal with that later.
-    person_templates = ['Template:BirthDeathAge','Template:Birth_date','Template:Birth-date','Template:Birth_date_and_age',
-                        'Template:Birth_date_and_age2','Template:Birth-date_and_age',
-                        'Template:Birth_year_and_age','Template:Birth_based_on_age_as_of_date',
-                        'Template:Birth_based_on_age_at_death','Template:Death_date','Template:Death-date',
-                        'Template:Death_date_and_age','Template:Death-date_and_age',
-                        'Template:Death_date_and_given_age','Template:Death_year_and_age']
-    with open('names.txt', 'w') as f:
+    sparql = SPARQLWrapper("http://dbpedia.org/sparql")
+    sparql.setReturnFormat(JSON)
+    with open('names.txt', 'x') as f:
         # Loop through the query. Only include pages in namespace 0 (Main/Article).
-        for res in site.query(titles=person_templates, prop=['transcludedin'],tinamespace=0):
-            # Loop through each template and all the pages within it.
+        for res in site.query(titles=['Template:Infobox'], prop=['transcludedin'],tinamespace=0):
+            # Loop through each template.
             for template in res.pages:
-                # Loop through each page transcluded in this template. The API only handles one
-                # title at a time, so most of the time, `template' will not contain an array of
-                # pages (attribute `transcludedin')
-                if hasattr(template, 'transcludedin'):
-                    # Loop through the transcluded list, which has all pages that contain
-                    # this template. Put them into a file for testing.
-                    for page in template.transcludedin:
-                        with redirect_stdout(f):
-                            print(page.title)
-
+                # Loop through each page with an Infobox and find out which one are people.
+                for page in template.transcludedin:
+                    # Create a query to select this page only if it is a Person via SPARQL endpoint.
+                    sparql.setQuery("""
+                    SELECT *
+                    WHERE
+                    {{
+                    ?page a    dbo:Person ;
+                    rdfs:label "{title}"@en
+                    }}""".format(title=page.title))
+                    try:
+                        ret = sparql.queryAndConvert()
+                        # If we got any results from the query, add this name to our file, because it is a person.
+                        if ret["results"]["bindings"]:
+                            with redirect_stdout(f):
+                                print(page.title)
+                    except Exception as e:
+                        print(e)
 name_loop()
