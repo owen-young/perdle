@@ -30,7 +30,7 @@ def test():
 
 # Loop through all pages with Infobox and see if they're people using Dbpedia.
 def name_loop():
-    sparql = SPARQLWrapper("http://dbpedia.org/sparql")
+    sparql = SPARQLWrapper("https://query.wikidata.org/sparql")
     sparql.setReturnFormat(JSON)
     with open('names.txt', 'x') as f:
         # Loop through the query. Only include pages in namespace 0 (Main/Article).
@@ -55,4 +55,7 @@ def name_loop():
                                 print(page.title)
                     except Exception as e:
                         print(e)
-name_loop()
+
+
+
+
