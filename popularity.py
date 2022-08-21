@@ -81,7 +81,7 @@ def update_pop_database():
     with open('names.txt', 'r') as people_file:
         for person in people_file:
             # Strip the link and new line, leaving only the Wikidata identifier.
-            res = re.match(r'http://www\.wikidata\.org/entity/(.*)\n', person)
+            res = re.match(r'http://www\.wikidata\.org/entity/(Q.*)\n', person)
             if not res or not res.group(1):
                 raise RuntimeError('names.txt is malformed!')
             wd_id = res.group(1)
@@ -104,11 +104,18 @@ def update_pop_database():
             wp_page_name = wd_page['sitelinks']['enwiki']['title']
 
             # Request the number of backlinks for this person via a GET request to a backlinks API.
-            # If it fails, print something out and move on.
-            response = requests.get(backlinks_endp.format(wp_page_name))
+            # If it fails, print something out and move on. For some reason, this is the only API
+            # endpoint that has raised an Exception, so this is the only try/catch at the moment...
+            try:
+                response = requests.get(backlinks_endp.format(wp_page_name), headers=req_headers_wiki)
+            except Exception(e):
+                print(e)
+                print(wd_page_name, 'backlinks API request failed miserably. Skip this name and move on.')
+                continue
             if response.status_code != HTTPStatus.OK:
                 print(wp_page_name, 'could not be requested on backlinks API')
                 continue
+
             num_backlinks = response.json()['wikilinks']['all']
 
             # Use Wikimedia REST API to get the number of page views for every month since the
