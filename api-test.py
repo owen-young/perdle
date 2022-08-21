@@ -23,7 +23,7 @@ def test():
 
     req_headers = {
         'accept': 'application/json',
-        'User-Agent': 'Perdle / v0 test'
+        'User-Agent': 'Perdle / owen.young0@protonmail.com'
     }
     response = requests.get("https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia.org/all-access/user/Tom_Brady/monthly/20220301/" + current_date, headers=req_headers)
     print(response.json())
