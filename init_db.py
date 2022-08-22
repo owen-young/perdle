@@ -1,7 +1,5 @@
 import sqlite3
 import re
-from mwclient import Site
-import json
 from SPARQLWrapper import SPARQLWrapper, JSON
 
 def init_db():
@@ -24,19 +22,7 @@ def init_db():
                 google_search_num)
                 ''')
 
-    # Create a query to insert a row for each person in names.txt.
-    query = '''
-            INSERT INTO popularity (wd_id, wp_article) VALUES (?, ?)
-            '''
-
-    # Create a SPARQL query to get all humans. Unfortunately, I would have done a query
-    # that only includes humans on the English Wikipedia, however, both the XML and
-    # JSON parser failed when trying to parse the output. RDF cannot be requested for
-    # SELECT queries.
-    #
-    # Because I was unable to do that, I need to connect to Wikidata, get the text from
-    # every single page and find the English Wikipedia article name. This causes this script
-    # to run for an ungodly amount of time.
+    # Create a SPARQL query to get all humans.
     sparql = SPARQLWrapper('https://query.wikidata.org/sparql')
     sparql.setReturnFormat(JSON)
 
@@ -47,39 +33,56 @@ def init_db():
     }
     ''')
 
+    # Create a query to insert a row for each person in the SPARQL query.
+    query = '''
+            INSERT INTO popularity (wd_id, wp_article) VALUES (?, ?)
+            '''
+
+    # Because the JSON response for the SPARQL query asking the question, "Give me a list
+    # of all people with an entry on English Wikipedia", similar to this query:
+    # https://www.wikidata.org/wiki/Wikidata:SPARQL_query_service/queries/examples#Countries_that_have_sitelinks_to_en.wiki
+    #
+    # was too large for JSON or XML to parse, extra querying is required. This formatted
+    # query is meant to get that information and put it in the popularity database.
+    wiki_article_query = '''
+    SELECT ?article ?articleName
+    WHERE {{
+      ?article schema:about wd:{} .
+      ?article schema:isPartOf <https://en.wikipedia.org/>;
+      schema:name ?articleName
+    }}
+    '''
+
+    # Create a list of all Wikidata entries that don't have a page on English Wikipedia.
+    no_english_list = []
+
     try:
         ret = sparql.queryAndConvert()
     except Exception as e:
         print('SPARQL query failed', e)
     else:
-        # Connect to Wikidata, and get a dictionary of all pages
-        wikidata_pages = Site('wikidata.org').pages
         for result in ret['results']['bindings']:
             # Strip the Wikidata link, leaving only the Wikidata identifier.
             # Leave out Lexemes (entities that start with L)
             res = re.match(r'http://www\.wikidata\.org/entity/(Q.*)', result['person']['value'])
             if not res or not res.group(1):
-                print(result['person']['value'], 'did not match regex')
+                # Move on
                 continue
 
             wd_id = res.group(1)
 
-            # Use the Wikidata page identifier to get the page text and convert it to JSON. If
-            # Page.text() returns an empty string, then the page doesn't exist. In this case,
-            # we print the ID and move on.
-            if not (wd_text := wikidata_pages[wd_id].text()):
-                print(wd_id, 'does not exist. Move on to the next person.')
+            # Query Wikidata to get the Wikipedia article name.
+            sparql.setQuery(wiki_article_query.format(wd_id))
+            wiki_name_ret = sparql.queryAndConvert()
+
+            # If we didn't find it, add it to a list of people that don't exist on English
+            # Wikipedia. Maybe I'll use it later, who knows. This gets output to non-english-list.txt.
+            if not wiki_name_ret['results']['bindings']:
+                no_english_list.append(wd_id)
                 continue
 
-            wd_page = json.loads(wd_text)
-
-            # Get the name of the page on English Wikipedia.
-            if not 'enwiki' in wd_page['sitelinks']:
-                # If this person does not have an entry on English Wikipedia,
-                # sorry, they are getting skipped.
-                continue
-
-            wp_article = wd_page['sitelinks']['enwiki']['title']
+            # Get the article name from the JSON response.
+            wp_article = wiki_name_ret['results']['bindings'][0]['articleName']['value']
 
             # Insert a row containing these two values into our database.
             cur.execute(query, (wd_id, wp_article))
@@ -87,8 +90,11 @@ def init_db():
         # We're out of names. Commit the transaction, close the connection, and return.
         con.commit()
         con.close()
+
+    with open('non-english-list.txt', 'x') as f:
+        for entry in no_english_list:
+            f.write(f'{entry}\n')
+
     return
 
 init_db()
-
-
