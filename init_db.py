@@ -1,6 +1,8 @@
+from multiprocessing.pool import ThreadPool
 import sqlite3
 import re
 from SPARQLWrapper import SPARQLWrapper, JSON
+from concurrent.futures import ThreadPoolExecutor
 
 def init_db():
     # Create our popularity database and populate it with People from Wikidata.
@@ -11,90 +13,212 @@ def init_db():
     # Create the table if it does not already exist, which contains:
     #    wd_id (primary key): name on Wikidata, such as Q747.
     #    wp_article:          artice name on English Wikipedia.
+    #    wd_sitelinks         number of sitelinks for a person's Wikidata page.
     #    wp_backlinks:        the number of backlinks on English Wikipedia for this person.
+    #                         A backlink is a link to this Wikipedia page on another page.
     #    wp_avgviews:         Average monthly views starting July 2015 for this
     #                         English Wikipedia article.
     #    google_search_num:   Number of Google Search results for this English Wikipedia
     #                         article name.
     cur.execute('''
                 CREATE TABLE IF NOT EXISTS popularity
-                (wd_id PRIMARY KEY, wp_article, wp_backlinks, wp_avgviews,
-                google_search_num)
+                (wd_id PRIMARY KEY, wp_article, wd_sitelinks, wp_backlinks,
+                wp_avgviews, google_search_num)
                 ''')
 
-    # Create a SPARQL query to get all humans.
+    # Close the database connection because this thread no longer needs it.
+    con.commit()
+    con.close()
+
+    # Create a list of queries to perform that give us people with the most sitelinks
+    # on Wikidata. Because of the sheer number of people on Wikidata (10,039,180), some
+    # filtering needs to be done, because a vast, vast majority of them should not show
+    # up in Perdle. This would not make the game fun. The weighting I've come up with here
+    # (i.e., how many people from each time period) is subjective.
+
+    # This query gets the 1000 people on Wikidata with the most sitelinks born before
+    # 1500 and has a page on English Wikipedia. In my view, there are far fewer than 1000
+    # people on this list considered "common knowledge," but I will get 1000 just in case.
+    before_1500_query = '''
+    SELECT DISTINCT ?person ?articleName ?sitelinks
+    WHERE {
+        ?person wdt:P31 wd:Q5;
+                wdt:P569 ?birth;
+        FILTER (?birth < "1500-01-01"^^xsd:dateTime) .
+        ?person wikibase:sitelinks ?sitelinks .
+        ?article schema:about ?person .
+        ?article schema:isPartOf <https://en.wikipedia.org/>;
+        schema:name ?articleName .
+        SERVICE wikibase:label {
+            bd:serviceParam wikibase:language "en"
+        }
+    }
+    ORDER BY DESC(?sitelinks)
+    LIMIT 1000
+    '''
+
+    # The queries going forward (from 1500 - present) need to be split up to avoid timeouts
+    # and HTTP status code 500. This is especially true for the 20th century, where many many
+    # people reside on Wikidata.
+
+    # This query is the same as before_1500_query, but goes between c. 1500 - 1800 and
+    # gets 4000 people.
+    between_1500_1800_query = '''
+    SELECT DISTINCT ?person ?articleName ?sitelinks
+    WHERE {
+        ?person wdt:P31 wd:Q5;
+                wdt:P569 ?birth;
+        FILTER (?birth >= "1500-01-01"^^xsd:dateTime && ?birth < "1800-01-01"^^xsd:dateTime) .
+        ?person wikibase:sitelinks ?sitelinks .
+        ?article schema:about ?person .
+        ?article schema:isPartOf <https://en.wikipedia.org/>;
+        schema:name ?articleName .
+        SERVICE wikibase:label {
+            bd:serviceParam wikibase:language "en"
+        }
+    }
+    ORDER BY DESC(?sitelinks)
+    LIMIT 4000
+    '''
+
+    # This query is the same as between_1500_1800_query, but it goes between c. 1800 - 1900 and
+    # gets 3000 people.
+    between_1800_1900_query = '''
+    SELECT DISTINCT ?person ?articleName ?sitelinks
+    WHERE {
+        ?person wdt:P31 wd:Q5;
+                wdt:P569 ?birth;
+        FILTER (?birth >= "1800-01-01"^^xsd:dateTime && ?birth < "1900-01-01"^^xsd:dateTime) .
+        ?person wikibase:sitelinks ?sitelinks .
+        ?article schema:about ?person .
+        ?article schema:isPartOf <https://en.wikipedia.org/>;
+        schema:name ?articleName .
+        SERVICE wikibase:label {
+            bd:serviceParam wikibase:language "en"
+        }
+    }
+    ORDER BY DESC(?sitelinks)
+    LIMIT 3000
+    '''
+
+    # This query is the same as between_1800_1900_query, but it goes between c. 1900 - 2000 and
+    # gets 3000 people total. A loop to create 4 different queries will use this formatted string
+    # to generate queries for people between c. 1900 - 1925, c. 1925 - 1950, c. 1950 - 1975, and
+    # c. 1975 - 2000.
+    formatted_1900s_query = '''
+    SELECT DISTINCT ?person ?articleName ?sitelinks
+    WHERE {{
+        ?person wdt:P31 wd:Q5;
+                wdt:P569 ?birth;
+        FILTER (?birth >= "{}-01-01"^^xsd:dateTime && ?birth < "{}-01-01"^^xsd:dateTime) .
+        ?person wikibase:sitelinks ?sitelinks .
+        ?article schema:about ?person .
+        ?article schema:isPartOf <https://en.wikipedia.org/>;
+        schema:name ?articleName .
+        SERVICE wikibase:label {{
+            bd:serviceParam wikibase:language "en"
+        }}
+    }}
+    ORDER BY DESC(?sitelinks)
+    LIMIT 750
+    '''
+
+    # Generate a list of queries for each quarter of the century, as outlined above.
+    query_1900s_list = []
+
+    # Year in the most recent query.
+    last_year_in_query = 1900
+
+    for i in range(1925, 2001, 25):
+        query_1900s_list.append(formatted_1900s_query.format(last_year_in_query, i))
+        last_year_in_query = i
+
+    # This query is the same as between_1800_1900_query, but it goes from c. 2000 - present and
+    # only gets 250 people. In my opinion, this category is too new to have a lot of entries.
+    after_2000_query = '''
+    SELECT DISTINCT ?person ?articleName ?sitelinks
+    WHERE {
+        ?person wdt:P31 wd:Q5;
+                wdt:P569 ?birth;
+        FILTER (?birth >= "2000-01-01"^^xsd:dateTime) .
+        ?person wikibase:sitelinks ?sitelinks .
+        ?article schema:about ?person .
+        ?article schema:isPartOf <https://en.wikipedia.org/>;
+        schema:name ?articleName .
+        SERVICE wikibase:label {
+            bd:serviceParam wikibase:language "en"
+        }
+    }
+    ORDER BY DESC(?sitelinks)
+    LIMIT 250
+    '''
+
+    query_list = [before_1500_query, between_1500_1800_query, between_1800_1900_query,
+                  after_2000_query] + query_1900s_list
+
+    # Start a thread to perform each of the queries and add each entry to the database.
+    with ThreadPoolExecutor() as executor:
+        executor.map(insert_pages_into_db, query_list)
+
+def insert_pages_into_db(query):
+    # Connect to the popularity database.
+    con = sqlite3.connect("pop.db")
+    cur = con.cursor()
+
+    # Create a SPARQLWrapper for performing SPARQL SELECT requests.
     sparql = SPARQLWrapper('https://query.wikidata.org/sparql')
     sparql.setReturnFormat(JSON)
 
-    sparql.setQuery('''
-    SELECT ?person
-    WHERE {
-      ?person wdt:P31 wd:Q5 .
-    }
-    ''')
-
     # Create a query to insert a row for each person in the SPARQL query.
-    query = '''
-            INSERT INTO popularity (wd_id, wp_article) VALUES (?, ?)
-            '''
-
-    # Because the JSON response for the SPARQL query asking the question, "Give me a list
-    # of all people with an entry on English Wikipedia", similar to this query:
-    # https://www.wikidata.org/wiki/Wikidata:SPARQL_query_service/queries/examples#Countries_that_have_sitelinks_to_en.wiki
     #
-    # was too large for JSON or XML to parse, extra querying is required. This formatted
-    # query is meant to get that information and put it in the popularity database.
-    wiki_article_query = '''
-    SELECT ?article ?articleName
-    WHERE {{
-      ?article schema:about wd:{} .
-      ?article schema:isPartOf <https://en.wikipedia.org/>;
-      schema:name ?articleName
-    }}
-    '''
+    # NOTE: Some historical figures don't have exact birth dates. If these
+    #       birth dates span across queries (for example Meera,
+    #       https://www.wikidata.org/wiki/Q466330, has a birth date of
+    #       1498 and 1504), then a sqlite3.IntegrityError is raised.
+    #       I will elect to ignore these exceptions and move on, but the
+    #       reason I don't just put an 'OR IGNORE' clause into my INSERT
+    #       query is because I would like to output which one was a duplicate,
+    #       just in case there is a bug in the database building code.
+    #       Hopefully it works!
+    insert_query = '''
+                   INSERT INTO popularity (wd_id, wp_article, wd_sitelinks) VALUES (?, ?, ?)
+                   '''
 
-    # Create a list of all Wikidata entries that don't have a page on English Wikipedia.
-    no_english_list = []
+    # Query the Wikidata SPARQL endpoint with the query given as input to this thread.
+    sparql.setQuery(query)
+    ret = sparql.queryAndConvert()
 
-    try:
-        ret = sparql.queryAndConvert()
-    except Exception as e:
-        print('SPARQL query failed', e)
-    else:
-        for result in ret['results']['bindings']:
-            # Strip the Wikidata link, leaving only the Wikidata identifier.
-            # Leave out Lexemes (entities that start with L)
-            res = re.match(r'http://www\.wikidata\.org/entity/(Q.*)', result['person']['value'])
-            if not res or not res.group(1):
-                # Move on
-                continue
+    for result in ret['results']['bindings']:
+        # Extract the Wikidata entity ID from the link.
+        res = re.match(r'http://www\.wikidata\.org/entity/(Q.*)', result['person']['value'])
+        if not res or not res.group(1):
+            # Move on
+            continue
 
-            wd_id = res.group(1)
+        wd_id = res.group(1)
 
-            # Query Wikidata to get the Wikipedia article name.
-            sparql.setQuery(wiki_article_query.format(wd_id))
-            wiki_name_ret = sparql.queryAndConvert()
+        # Get the article name from the JSON response.
+        wp_article = result['articleName']['value']
 
-            # If we didn't find it, add it to a list of people that don't exist on English
-            # Wikipedia. Maybe I'll use it later, who knows. This gets output to non-english-list.txt.
-            if not wiki_name_ret['results']['bindings']:
-                no_english_list.append(wd_id)
-                continue
+        # Get the number of sitelinks from the JSON response. If the response we got was not
+        # an integer, something is wrong and this script must be changed.
+        if result['sitelinks']['datatype'] != 'http://www.w3.org/2001/XMLSchema#integer':
+            raise RuntimeError('Sitelinks data type is not an integer:',
+                                result['sitelinks']['datatype'])
 
-            # Get the article name from the JSON response.
-            wp_article = wiki_name_ret['results']['bindings'][0]['articleName']['value']
+        wd_sitelinks = int(result['sitelinks']['value'])
 
-            # Insert a row containing these two values into our database.
-            cur.execute(query, (wd_id, wp_article))
+        # Insert a row containing these values into our database.
+        try:
+            cur.execute(insert_query, (wd_id, wp_article, wd_sitelinks))
+        except sqlite3.IntegrityError:
+            print(wd_id, 'IS A DUPLICATE!!!!!')
+            raise sqlite3.IntegrityError
 
-        # We're out of names. Commit the transaction, close the connection, and return.
-        con.commit()
-        con.close()
-
-    with open('non-english-list.txt', 'x') as f:
-        for entry in no_english_list:
-            f.write(f'{entry}\n')
-
+    # We have processed the whole query. Commit the transaction, close the
+    # connection, and return.
+    con.commit()
+    con.close()
     return
 
 init_db()

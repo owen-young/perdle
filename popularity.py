@@ -6,6 +6,7 @@ import functools
 import re
 from http import HTTPStatus
 from concurrent.futures import ThreadPoolExecutor
+from SPARQLWrapper import SPARQLWrapper, JSON
 
 # Update our database, pop.db, with all popularity statistics. This code runs
 # with the following assumptions:
@@ -13,6 +14,60 @@ from concurrent.futures import ThreadPoolExecutor
 # The database exists and is populated with rows for every human on Wikidata,
 # with the wd_article column filled with its associated English Wikipedia article
 # name.
+
+# Update all Wiki sitelinks in the popularity database.
+#
+# Input: all_rows is a list of tuples, where each tuple is a row in the popularity
+#        database. This is of the format (wd_id, wp_article).
+def update_sitelinks(all_rows):
+    # Connect to our local popularity database.
+    con = sqlite3.connect("pop.db")
+    cur = con.cursor()
+
+    # Query to update the number of Wiki sitelinks for a given person
+    sitelinks_upd_query = 'UPDATE popularity SET wd_sitelinks = ? WHERE wd_id = ?'
+
+    # SPARQL query to get the number of Wiki sitelinks for a given person
+    sitelinks_query = '''
+    SELECT ?sitelinks
+    WHERE {{
+      wd:{} wikibase:sitelinks ?sitelinks .
+    }}
+    '''
+
+    # Create a SPARQLWrapper for performing SPARQL SELECT requests.
+    sparql = SPARQLWrapper('https://query.wikidata.org/sparql')
+    sparql.setReturnFormat(JSON)
+
+    for row in all_rows:
+        wd_id = row[0]
+
+        # Get the number of Wiki sitelinks for this page using Wikidata SPARQL endpoint.
+        sparql.setQuery(sitelinks_query.format(wd_id))
+        ret = sparql.queryAndConvert()
+
+        # Make sure we didn't get more than one sitelink value from the SPARQL endpoint.
+        if len(ret['results']['bindings']) != 1:
+            raise RuntimeError('More than one sitelinks count:', ret['results']['bindings'])
+
+        json_sitelink = ret['results']['bindings'][0]['sitelinks']
+
+        # Get the number of sitelinks from the JSON response. If the response we got was not
+        # an integer, something is wrong and this script must be changed.
+        if json_sitelink['datatype'] != 'http://www.w3.org/2001/XMLSchema#integer':
+            raise RuntimeError('Sitelinks data type is not an integer:',
+                                json_sitelink['datatype'])
+
+        wd_sitelinks = int(json_sitelink['value'])
+
+        # Update the database.
+        cur.execute(sitelinks_upd_query, (wd_sitelinks, wd_id))
+
+    # We have reached the end of the database. Commit the changes, close the connection,
+    # and exit.
+    con.commit()
+    con.close()
+    return
 
 
 # Update all backlinks in the popularity database.
@@ -96,7 +151,7 @@ def update_avgviews(all_rows):
             continue
 
         # Compute a monthly average.
-        avg_pageviews = functools.reduce(lambda acc, el: acc + el['views'], \
+        avg_pageviews = functools.reduce(lambda acc, el: acc + el['views'],
                                         response.json()['items'], 0) / len(response.json()['items'])
 
         # Update the database.
@@ -170,26 +225,29 @@ def driver():
 
     # Start a thread for each field in the database that needs to be updated.
     #
-    # We should not have concurrency issues in the database because each thread
-    # is updating a separate column of any given row. The order that these
+    # We should not have concurrency issues (fingers crossed!) in the database because
+    # each thread is updating a separate column of any given row. The order that these
     # transactions occur in does not matter, as long as each column is updated.
 
     with ThreadPoolExecutor() as executor:
+        sitelinks_thread = executor.submit(update_sitelinks, all_rows=all_db_rows)
         backlinks_thread = executor.submit(update_backlinks, all_rows=all_db_rows)
         pageviews_thread = executor.submit(update_avgviews, all_rows=all_db_rows)
         goog_search_thread = executor.submit(update_goog_search_num, all_rows=all_db_rows)
 
         # Check each thread for exceptions. Each function returns None.
         try:
+            sitelinks_thread.result()
+        except Exception as e:
+            print("Sitelinks thread failed with the following exception:", e)
+        try:
             backlinks_thread.result()
         except Exception as e:
             print("Backlinks thread failed with the following exception:", e)
-
         try:
             pageviews_thread.result()
         except Exception as e:
             print("Pageviews thread failed with the following exception:", e)
-
         try:
             goog_search_thread.result()
         except Exception as e:
