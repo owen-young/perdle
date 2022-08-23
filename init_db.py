@@ -1,10 +1,11 @@
-from multiprocessing.pool import ThreadPool
 import sqlite3
+import json
 import re
 from SPARQLWrapper import SPARQLWrapper, JSON
-from concurrent.futures import ThreadPoolExecutor
+import aiohttp
+import asyncio
 
-def init_db():
+async def init_db():
     # Create our popularity database and populate it with People from Wikidata.
 
     con = sqlite3.connect("pop.db")
@@ -57,25 +58,28 @@ def init_db():
     # and HTTP status code 500. This is especially true for the 20th century, where many many
     # people reside on Wikidata.
 
-    # This query is the same as before_1500_query, but goes between c. 1500 - 1800 and
-    # gets 4000 people.
-    between_1500_1800_query = '''
+    # This formatted query is used to split up the people from c. 1500 - 1800, since sometimes
+    # this query would fail.
+    formatted_1500_1800_query = '''
     SELECT DISTINCT ?person ?articleName ?sitelinks
-    WHERE {
+    WHERE {{
         ?person wdt:P31 wd:Q5;
                 wdt:P569 ?birth;
-        FILTER (?birth >= "1500-01-01"^^xsd:dateTime && ?birth < "1800-01-01"^^xsd:dateTime) .
+        FILTER (?birth >= "{}-01-01"^^xsd:dateTime && ?birth < "{}-01-01"^^xsd:dateTime) .
         ?person wikibase:sitelinks ?sitelinks .
         ?article schema:about ?person .
         ?article schema:isPartOf <https://en.wikipedia.org/>;
         schema:name ?articleName .
-        SERVICE wikibase:label {
+        SERVICE wikibase:label {{
             bd:serviceParam wikibase:language "en"
-        }
-    }
+        }}
+    }}
     ORDER BY DESC(?sitelinks)
-    LIMIT 4000
+    LIMIT 1000
     '''
+
+    # Generate a list of queries for each part of the century, as outlined above.
+    query_1500_1800_list = get_formatted_query_list(formatted_1500_1800_query, 1500, 1800, 100)
 
     # This query is the same as between_1500_1800_query, but it goes between c. 1800 - 1900 and
     # gets 3000 people.
@@ -94,13 +98,11 @@ def init_db():
         }
     }
     ORDER BY DESC(?sitelinks)
-    LIMIT 3000
+    LIMIT 1000
     '''
 
-    # This query is the same as between_1800_1900_query, but it goes between c. 1900 - 2000 and
-    # gets 3000 people total. A loop to create 4 different queries will use this formatted string
-    # to generate queries for people between c. 1900 - 1925, c. 1925 - 1950, c. 1950 - 1975, and
-    # c. 1975 - 2000.
+    # This query is used to split up people born between c. 1900 - 2000, because this query
+    # altogether (for all 4000 people) consistently timed out.
     formatted_1900s_query = '''
     SELECT DISTINCT ?person ?articleName ?sitelinks
     WHERE {{
@@ -116,18 +118,11 @@ def init_db():
         }}
     }}
     ORDER BY DESC(?sitelinks)
-    LIMIT 750
+    LIMIT 200
     '''
 
-    # Generate a list of queries for each quarter of the century, as outlined above.
-    query_1900s_list = []
-
-    # Year in the most recent query.
-    last_year_in_query = 1900
-
-    for i in range(1925, 2001, 25):
-        query_1900s_list.append(formatted_1900s_query.format(last_year_in_query, i))
-        last_year_in_query = i
+    # Generate a list of queries for each part of the century, as outlined above.
+    query_1900s_list = get_formatted_query_list(formatted_1900s_query, 1900, 2000, 5)
 
     # This query is the same as between_1800_1900_query, but it goes from c. 2000 - present and
     # only gets 250 people. In my opinion, this category is too new to have a lot of entries.
@@ -149,8 +144,8 @@ def init_db():
     LIMIT 250
     '''
 
-    query_list = [before_1500_query, between_1500_1800_query, between_1800_1900_query,
-                  after_2000_query] + query_1900s_list
+    query_list = [before_1500_query, between_1800_1900_query,
+                  after_2000_query] + query_1900s_list + query_1500_1800_list
 
 
     # Create a query to insert a row for each person in the SPARQL query.
@@ -168,10 +163,17 @@ def init_db():
                    INSERT INTO popularity (wd_id, wp_article, wd_sitelinks) VALUES (?, ?, ?)
                    '''
 
-    # Start a thread to perform each of the queries, where each thread returns a list
-    # of (wd_id, wp_article, wd_sitelinks) tuples to INSERT.
-    with ThreadPoolExecutor() as executor:
-        for result in executor.map(get_insert_list, query_list):
+    # Asynchronously perform each SPARQL query and INSERT the results into our
+    # SQLite database.
+    async with aiohttp.ClientSession() as session:
+        # Create a task for every query.
+        tasks = []
+
+        for query in query_list:
+            tasks.append(asyncio.ensure_future(wd_sparql_query(session, query)))
+
+        query_results = await asyncio.gather(*tasks)
+        for result in query_results:
             # Insert a row containing these tuples into our database.
             try:
                 cur.executemany(insert_query, result)
@@ -180,44 +182,72 @@ def init_db():
 
     con.commit()
     con.close()
+    return
 
-# Return a list of tuples to INSERT into the popularity table in pop.db.
-def get_insert_list(query):
+# Routine to perform the GET request on the SPARQL endpoint asynchronously.
+async def wd_sparql_query(session, query):
 
-    # Create a SPARQLWrapper for performing SPARQL SELECT requests.
-    sparql = SPARQLWrapper('https://query.wikidata.org/sparql')
-    sparql.setReturnFormat(JSON)
+    # Define the header and parameters for upcoming GET request.
+    url = 'https://query.wikidata.org/sparql'
+    wiki_params = {'format': 'json', 'query': query}
 
-    # Query the Wikidata SPARQL endpoint with the query given as input to this thread.
-    sparql.setQuery(query)
-    ret = sparql.queryAndConvert()
-
-    # Define a list tuples to be INSERTed once this thread finishes.
+    # Perform the GET request for our query and loop through the results, returning
+    # a tuple of all Wikidata entity names, Wikipedia article names, and number of
+    # Wiki sitelinks.
     tuple_list = []
 
-    for result in ret['results']['bindings']:
-        # Extract the Wikidata entity ID from the link.
-        res = re.match(r'http://www\.wikidata\.org/entity/(Q.*)', result['person']['value'])
-        if not res or not res.group(1):
-            # Move on
-            continue
+    async with session.get(url, params=wiki_params) as resp:
+        try:
+            query_results = await resp.json()
+        except Exception as e:
+            print(query)
+            raise e
+        for result in query_results['results']['bindings']:
+            # Extract the Wikidata entity ID from the link.
+            res = re.match(r'http://www\.wikidata\.org/entity/(Q.*)', result['person']['value'])
+            if not res or not res.group(1):
+                # Move on
+                continue
 
-        wd_id = res.group(1)
+            wd_id = res.group(1)
 
-        # Get the article name from the JSON response.
-        wp_article = result['articleName']['value']
+            # Get the article name from the JSON response.
+            wp_article = result['articleName']['value']
 
-        # Get the number of sitelinks from the JSON response. If the response we got was not
-        # an integer, something is wrong and this script must be changed.
-        if result['sitelinks']['datatype'] != 'http://www.w3.org/2001/XMLSchema#integer':
-            raise RuntimeError('Sitelinks data type is not an integer:',
-                                result['sitelinks']['datatype'])
+            # Get the number of sitelinks from the JSON response. If the response we got was not
+            # an integer, something is wrong and this script must be changed.
+            if result['sitelinks']['datatype'] != 'http://www.w3.org/2001/XMLSchema#integer':
+                raise RuntimeError('Sitelinks data type is not an integer:',
+                                    result['sitelinks']['datatype'])
 
-        wd_sitelinks = int(result['sitelinks']['value'])
+            wd_sitelinks = int(result['sitelinks']['value'])
 
-        tuple_list.append((wd_id, wp_article, wd_sitelinks))
+            tuple_list.append((wd_id, wp_article, wd_sitelinks))
 
-    # We are all out of results for this query. Return the tuple INSERT list.
+    # Return the list of all (wd_id, wp_article, wd_sitelinks) tuples from this query.
     return tuple_list
 
-init_db()
+
+# Return a list of queries from a formatted query, giving ranges of time, such
+# as c. 1900 - 1905, ... c. 1995 - 2000. This only works, however, if the step
+# is divisible by the amount of time being covered. Otherwise you won't get
+# enough queries.
+def get_formatted_query_list(formatted_query, start, end, step):
+
+    # Make sure we got the correct input.
+    if ((end - start) % step) != 0:
+        raise RuntimeError('Invalid year range provided!')
+
+    # Generate a list of queries for each part of the range provided.
+    query_list = []
+
+    # Year in the most recent query.
+    last_year_in_query = start
+
+    for i in range(start+step, end+1, step):
+        query_list.append(formatted_query.format(last_year_in_query, i))
+        last_year_in_query = i
+
+    return query_list
+
+asyncio.run(init_db())

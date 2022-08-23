@@ -1,0 +1,67 @@
+query = '''
+SELECT ?person ?article
+WHERE {
+  ?person wdt:P31 wd:Q5;
+          wdt:P569 ?birth;
+  FILTER (?birth < "0000-01-01"^^xsd:dateTime) .
+  ?article schema:about ?person .
+  ?article schema:isPartOf <https://en.wikipedia.org/>.
+  SERVICE wikibase:label {
+    bd:serviceParam wikibase:language "en"
+  }
+}
+'''
+
+query = '''
+SELECT ?person ?article
+WHERE {
+  ?person wdt:P31 wd:Q5;
+          wdt:P569 ?birth;
+  FILTER (?birth < "1500-01-01"^^xsd:dateTime) .
+  ?article schema:about ?person .
+  ?article schema:isPartOf <https://en.wikipedia.org/>.
+  SERVICE wikibase:label {
+    bd:serviceParam wikibase:language "en"
+  }
+}
+
+'''
+
+query = '''
+SELECT ?person ?article ?sitelinks
+WHERE {
+  ?person wdt:P31 wd:Q5;
+          wdt:P569 ?birth;
+  FILTER (?birth < "1950-01-01"^^xsd:dateTime && ?birth > "1940-01-01"^^xsd:dateTime) .
+  ?person wikibase:sitelinks ?sitelinks .
+  ?article schema:about ?person .
+  ?article schema:isPartOf <https://en.wikipedia.org/>.
+  SERVICE wikibase:label {
+    bd:serviceParam wikibase:language "en"
+  }
+}
+ORDER BY DESC(?sitelinks)
+LIMIT 2000
+'''
+
+query = '''
+SELECT ?person ?article ?sitelinks
+WHERE {
+  ?person wdt:P31 wd:Q5;
+          wdt:P569 ?birth;
+  FILTER (?birth >= "1950-01-01"^^xsd:dateTime && ?birth < "1975-01-01"^^xsd:dateTime) .
+  ?person wikibase:sitelinks ?sitelinks .
+  ?article schema:about ?person .
+  ?article schema:isPartOf <https://en.wikipedia.org/>.
+  SERVICE wikibase:label {
+    bd:serviceParam wikibase:language "en"
+  }
+}
+ORDER BY DESC(?sitelinks)
+LIMIT 750
+'''
+
+10,039,180 people on Wikidata
+
+sparql.setQuery(query)
+ret = sparql.queryAndConvert()
