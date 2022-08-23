@@ -26,10 +26,6 @@ def init_db():
                 wp_avgviews, google_search_num)
                 ''')
 
-    # Close the database connection because this thread no longer needs it.
-    con.commit()
-    con.close()
-
     # Create a list of queries to perform that give us people with the most sitelinks
     # on Wikidata. Because of the sheer number of people on Wikidata (10,039,180), some
     # filtering needs to be done, because a vast, vast majority of them should not show
@@ -156,18 +152,6 @@ def init_db():
     query_list = [before_1500_query, between_1500_1800_query, between_1800_1900_query,
                   after_2000_query] + query_1900s_list
 
-    # Start a thread to perform each of the queries and add each entry to the database.
-    with ThreadPoolExecutor() as executor:
-        executor.map(insert_pages_into_db, query_list)
-
-def insert_pages_into_db(query):
-    # Connect to the popularity database.
-    con = sqlite3.connect("pop.db")
-    cur = con.cursor()
-
-    # Create a SPARQLWrapper for performing SPARQL SELECT requests.
-    sparql = SPARQLWrapper('https://query.wikidata.org/sparql')
-    sparql.setReturnFormat(JSON)
 
     # Create a query to insert a row for each person in the SPARQL query.
     #
@@ -184,9 +168,32 @@ def insert_pages_into_db(query):
                    INSERT INTO popularity (wd_id, wp_article, wd_sitelinks) VALUES (?, ?, ?)
                    '''
 
+    # Start a thread to perform each of the queries, where each thread returns a list
+    # of (wd_id, wp_article, wd_sitelinks) tuples to INSERT.
+    with ThreadPoolExecutor() as executor:
+        for result in executor.map(get_insert_list, query_list):
+            # Insert a row containing these tuples into our database.
+            try:
+                cur.executemany(insert_query, result)
+            except sqlite3.IntegrityError:
+                print('Duplicate found')
+
+    con.commit()
+    con.close()
+
+# Return a list of tuples to INSERT into the popularity table in pop.db.
+def get_insert_list(query):
+
+    # Create a SPARQLWrapper for performing SPARQL SELECT requests.
+    sparql = SPARQLWrapper('https://query.wikidata.org/sparql')
+    sparql.setReturnFormat(JSON)
+
     # Query the Wikidata SPARQL endpoint with the query given as input to this thread.
     sparql.setQuery(query)
     ret = sparql.queryAndConvert()
+
+    # Define a list tuples to be INSERTed once this thread finishes.
+    tuple_list = []
 
     for result in ret['results']['bindings']:
         # Extract the Wikidata entity ID from the link.
@@ -208,17 +215,9 @@ def insert_pages_into_db(query):
 
         wd_sitelinks = int(result['sitelinks']['value'])
 
-        # Insert a row containing these values into our database.
-        try:
-            cur.execute(insert_query, (wd_id, wp_article, wd_sitelinks))
-        except sqlite3.IntegrityError:
-            print(wd_id, 'IS A DUPLICATE!!!!!')
-            raise sqlite3.IntegrityError
+        tuple_list.append((wd_id, wp_article, wd_sitelinks))
 
-    # We have processed the whole query. Commit the transaction, close the
-    # connection, and return.
-    con.commit()
-    con.close()
-    return
+    # We are all out of results for this query. Return the tuple INSERT list.
+    return tuple_list
 
 init_db()

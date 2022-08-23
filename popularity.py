@@ -15,17 +15,12 @@ from SPARQLWrapper import SPARQLWrapper, JSON
 # with the wd_article column filled with its associated English Wikipedia article
 # name.
 
-# Update all Wiki sitelinks in the popularity database.
+# Return a list of tuples of the format (wd_id, wd_sitelinks) to UPDATE when this
+# thread completes.
 #
 # Input: all_rows is a list of tuples, where each tuple is a row in the popularity
 #        database. This is of the format (wd_id, wp_article).
 def update_sitelinks(all_rows):
-    # Connect to our local popularity database.
-    con = sqlite3.connect("pop.db")
-    cur = con.cursor()
-
-    # Query to update the number of Wiki sitelinks for a given person
-    sitelinks_upd_query = 'UPDATE popularity SET wd_sitelinks = ? WHERE wd_id = ?'
 
     # SPARQL query to get the number of Wiki sitelinks for a given person
     sitelinks_query = '''
@@ -34,6 +29,9 @@ def update_sitelinks(all_rows):
       wd:{} wikibase:sitelinks ?sitelinks .
     }}
     '''
+
+    # Define a list tuples to be UPDATEd once this thread finishes.
+    tuple_list = []
 
     # Create a SPARQLWrapper for performing SPARQL SELECT requests.
     sparql = SPARQLWrapper('https://query.wikidata.org/sparql')
@@ -60,31 +58,24 @@ def update_sitelinks(all_rows):
 
         wd_sitelinks = int(json_sitelink['value'])
 
-        # Update the database.
-        cur.execute(sitelinks_upd_query, (wd_sitelinks, wd_id))
+        # Add this tuple to the list to UPDATE.
+        tuple_list.append((wd_sitelinks, wd_id))
 
-    # We have reached the end of the database. Commit the changes, close the connection,
-    # and exit.
-    con.commit()
-    con.close()
-    return
+    return tuple_list
 
 
-# Update all backlinks in the popularity database.
+# Return a list of tuples of the format (wd_id, wp_backlinks) to UPDATE when this
+# thread completes.
 #
 # Input: all_rows is a list of tuples, where each tuple is a row in the popularity
 #        database. This is of the format (wd_id, wp_article).
 def update_backlinks(all_rows):
 
-    # Connect to our local popularity database.
-    con = sqlite3.connect("pop.db")
-    cur = con.cursor()
-
-    # Query to update the number of backlinks for a given person
-    bl_query = 'UPDATE popularity SET wp_backlinks = ? WHERE wd_id = ?'
-
     # API endpoint for number of backlinks for a given Wikipedia page.
     backlinks_endp = 'http://linkcount.toolforge.org/api/?page={}&project=en.wikipedia.org'
+
+    # Define a list tuples to be UPDATEd once this thread finishes.
+    tuple_list = []
 
     for row in all_rows:
         wd_id = row[0]
@@ -100,27 +91,17 @@ def update_backlinks(all_rows):
 
         num_backlinks = response.json()['wikilinks']['all']
 
-        # Update the database.
-        cur.execute(bl_query, (num_backlinks, wd_id))
+        # Add this tuple to the list to UPDATE.
+        tuple_list.append((num_backlinks, wd_id))
 
-    # We have reached the end of the database. Commit the changes, close the connection,
-    # and exit.
-    con.commit()
-    con.close()
-    return
+    return tuple_list
 
-# Update all average page view statistics in the popularity database.
+# Return a list of tuples of the format (wd_id, wp_avgviews) to UPDATE when this
+# thread completes.
 #
 # Input: all_rows is a list of tuples, where each tuple is a row in the popularity
 #        database. This is of the format (wd_id, wp_article).
 def update_avgviews(all_rows):
-
-    # Connect to our local popularity database.
-    con = sqlite3.connect("pop.db")
-    cur = con.cursor()
-
-    # Query to update the number of backlinks for a given person
-    avg_views_query = 'UPDATE popularity SET wp_avgviews = ? WHERE wd_id = ?'
 
     # Today's date in a format for Wikidata REST API.
     current_date = datetime.today().strftime('%Y%m%d')
@@ -133,6 +114,9 @@ def update_avgviews(all_rows):
         'accept': 'application/json',
         'User-Agent': 'Perdle / owen.young0@protonmail.com'
     }
+
+    # Define a list tuples to be UPDATEd once this thread finishes.
+    tuple_list = []
 
     for row in all_rows:
         wd_id = row[0]
@@ -154,27 +138,17 @@ def update_avgviews(all_rows):
         avg_pageviews = functools.reduce(lambda acc, el: acc + el['views'],
                                         response.json()['items'], 0) / len(response.json()['items'])
 
-        # Update the database.
-        cur.execute(avg_views_query, (avg_pageviews, wd_id))
+        # Add this tuple to the list to UPDATE.
+        tuple_list.append((avg_pageviews, wd_id))
 
-    # We have reached the end of the database. Commit the changes, close the connection,
-    # and exit.
-    con.commit()
-    con.close()
-    return
+    return tuple_list
 
-# Update all google search results statistics in the popularity database.
+# Return a list of tuples of the format (wd_id, google_search_num) to UPDATE when this
+# thread completes.
 #
 # Input: all_rows is a list of tuples, where each tuple is a row in the popularity
 #        database. This is of the format (wd_id, wp_article).
 def update_goog_search_num(all_rows):
-
-    # Connect to our local popularity database.
-    con = sqlite3.connect("pop.db")
-    cur = con.cursor()
-
-    # Query to update the number of backlinks for a given person
-    search_num_query = 'UPDATE popularity SET google_search_num = ? WHERE wd_id = ?'
 
     # Link for Google search
     google_search = 'https://www.google.com/search?q={}'
@@ -183,6 +157,9 @@ def update_goog_search_num(all_rows):
     req_headers_goog = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.149 Safari/537.36'
     }
+
+    # Define a list tuples to be UPDATEd once this thread finishes.
+    tuple_list = []
 
     for row in all_rows:
         wd_id = row[0]
@@ -203,14 +180,10 @@ def update_goog_search_num(all_rows):
 
         num_goog_results = int(res.group(1).replace(',', ''))
 
-        # Update the database.
-        cur.execute(search_num_query, (num_goog_results, wd_id))
+        # Add this tuple to the list to UPDATE.
+        tuple_list.append((num_goog_results, wd_id))
 
-    # We have reached the end of the database. Commit the changes, close the connection,
-    # and exit.
-    con.commit()
-    con.close()
-    return
+    return tuple_list
 
 def driver():
     # Connect to our local popularity database.
@@ -237,21 +210,46 @@ def driver():
 
         # Check each thread for exceptions. Each function returns None.
         try:
-            sitelinks_thread.result()
+            # Query to update the number of Wiki sitelinks for a given person
+            sitelinks_upd_query = 'UPDATE popularity SET wd_sitelinks = ? WHERE wd_id = ?'
+            tuple_list = sitelinks_thread.result()
+
+            # Update the database.
+            cur.executemany(sitelinks_upd_query, tuple_list)
         except Exception as e:
             print("Sitelinks thread failed with the following exception:", e)
+
         try:
-            backlinks_thread.result()
+            # Query to update the number of backlinks for a given person
+            bl_query = 'UPDATE popularity SET wp_backlinks = ? WHERE wd_id = ?'
+            tuple_list = backlinks_thread.result()
+
+            # Update the database.
+            cur.executemany(bl_query, tuple_list)
         except Exception as e:
             print("Backlinks thread failed with the following exception:", e)
+
         try:
-            pageviews_thread.result()
+            # Query to update the number of backlinks for a given person
+            avg_views_query = 'UPDATE popularity SET wp_avgviews = ? WHERE wd_id = ?'
+            tuple_list = pageviews_thread.result()
+
+            # Update the database.
+            cur.executemany(avg_views_query, tuple_list)
         except Exception as e:
             print("Pageviews thread failed with the following exception:", e)
         try:
-            goog_search_thread.result()
+            # Query to update the number of backlinks for a given person
+            search_num_query = 'UPDATE popularity SET google_search_num = ? WHERE wd_id = ?'
+            tuple_list = goog_search_thread.result()
+
+            # Update the database.
+            cur.executemany(search_num_query, tuple_list)
         except Exception as e:
-            print("Google search thread failed with the following exception")
+            print("Google search thread failed with the following exception", e)
+
+    con.commit()
+    con.close()
 
     return
 
