@@ -1,7 +1,5 @@
 import sqlite3
-import json
 import re
-from SPARQLWrapper import SPARQLWrapper, JSON
 import aiohttp
 import asyncio
 
@@ -58,9 +56,8 @@ async def init_db():
     # and HTTP status code 500. This is especially true for the 20th century, where many many
     # people reside on Wikidata.
 
-    # This formatted query is used to split up the people from c. 1500 - 1800, since sometimes
-    # this query would fail.
-    formatted_1500_1800_query = '''
+    # This formatted query is used to split up the people from c. 1500 - 1900.
+    formatted_1500_1900_query = '''
     SELECT DISTINCT ?person ?articleName ?sitelinks
     WHERE {{
         ?person wdt:P31 wd:Q5;
@@ -75,34 +72,14 @@ async def init_db():
         }}
     }}
     ORDER BY DESC(?sitelinks)
-    LIMIT 1000
+    LIMIT 750
     '''
 
     # Generate a list of queries for each part of the century, as outlined above.
-    query_1500_1800_list = get_formatted_query_list(formatted_1500_1800_query, 1500, 1800, 100)
-
-    # This query is the same as between_1500_1800_query, but it goes between c. 1800 - 1900 and
-    # gets 3000 people.
-    between_1800_1900_query = '''
-    SELECT DISTINCT ?person ?articleName ?sitelinks
-    WHERE {
-        ?person wdt:P31 wd:Q5;
-                wdt:P569 ?birth;
-        FILTER (?birth >= "1800-01-01"^^xsd:dateTime && ?birth < "1900-01-01"^^xsd:dateTime) .
-        ?person wikibase:sitelinks ?sitelinks .
-        ?article schema:about ?person .
-        ?article schema:isPartOf <https://en.wikipedia.org/>;
-        schema:name ?articleName .
-        SERVICE wikibase:label {
-            bd:serviceParam wikibase:language "en"
-        }
-    }
-    ORDER BY DESC(?sitelinks)
-    LIMIT 1000
-    '''
+    query_1500_1900_list = get_formatted_query_list(formatted_1500_1900_query, 1500, 1900, 50)
 
     # This query is used to split up people born between c. 1900 - 2000, because this query
-    # altogether (for all 4000 people) consistently timed out.
+    # altogether (for all 5000 people) consistently timed out.
     formatted_1900s_query = '''
     SELECT DISTINCT ?person ?articleName ?sitelinks
     WHERE {{
@@ -118,7 +95,7 @@ async def init_db():
         }}
     }}
     ORDER BY DESC(?sitelinks)
-    LIMIT 200
+    LIMIT 250
     '''
 
     # Generate a list of queries for each part of the century, as outlined above.
@@ -144,8 +121,7 @@ async def init_db():
     LIMIT 250
     '''
 
-    query_list = [before_1500_query, between_1800_1900_query,
-                  after_2000_query] + query_1900s_list + query_1500_1800_list
+    query_list = [before_1500_query, after_2000_query] + query_1900s_list + query_1500_1900_list
 
 
     # Create a query to insert a row for each person in the SPARQL query.
@@ -226,7 +202,6 @@ async def wd_sparql_query(session, query):
 
     # Return the list of all (wd_id, wp_article, wd_sitelinks) tuples from this query.
     return tuple_list
-
 
 # Return a list of queries from a formatted query, giving ranges of time, such
 # as c. 1900 - 1905, ... c. 1995 - 2000. This only works, however, if the step
