@@ -1,12 +1,11 @@
 from pywikiapi import wikipedia
-import requests
 from datetime import datetime
 import sqlite3
 import functools
 import re
 from http import HTTPStatus
-from concurrent.futures import ThreadPoolExecutor
-from SPARQLWrapper import SPARQLWrapper, JSON
+import aiohttp
+import asyncio
 
 # Update our database, pop.db, with all popularity statistics. This code runs
 # with the following assumptions:
@@ -14,13 +13,19 @@ from SPARQLWrapper import SPARQLWrapper, JSON
 # The database exists and is populated with rows for every human on Wikidata,
 # with the wd_article column filled with its associated English Wikipedia article
 # name.
-
-# Return a list of tuples of the format (wd_id, wd_sitelinks) to UPDATE when this
-# thread completes.
 #
-# Input: all_rows is a list of tuples, where each tuple is a row in the popularity
-#        database. This is of the format (wd_id, wp_article).
-def update_sitelinks(all_rows):
+# NOTE: I know it is bad to use .format() for SQL queries because of SQL injection
+#       attacks. However, I figured since each input is something that is already
+#       in the database, and this takes no user input (it only reads from pop.db),
+#       that threat is not as serious. I could be wrong, but hey.
+
+# Return a SQL UPDATE query for the number of Wiki sitelinks.
+#
+# Input: row is a tuple of the format (wd_id, wp_article).
+#
+#        session is the aiohttp ClientSession associated with this asynchronous
+#        API request.
+async def update_sitelinks(row, session):
 
     # SPARQL query to get the number of Wiki sitelinks for a given person
     sitelinks_query = '''
@@ -30,19 +35,21 @@ def update_sitelinks(all_rows):
     }}
     '''
 
-    # Define a list tuples to be UPDATEd once this thread finishes.
-    tuple_list = []
+    # SPARQL endpoint
+    url = 'https://query.wikidata.org/sparql'
 
-    # Create a SPARQLWrapper for performing SPARQL SELECT requests.
-    sparql = SPARQLWrapper('https://query.wikidata.org/sparql')
-    sparql.setReturnFormat(JSON)
+    wd_id = row[0]
 
-    for row in all_rows:
-        wd_id = row[0]
+    # Define the parameters for upcoming GET request.
+    wiki_params = {'format': 'json', 'query': sitelinks_query.format(wd_id)}
 
-        # Get the number of Wiki sitelinks for this page using Wikidata SPARQL endpoint.
-        sparql.setQuery(sitelinks_query.format(wd_id))
-        ret = sparql.queryAndConvert()
+    # Query to update the number of Wiki sitelinks for a given person
+    sitelinks_upd_query = 'UPDATE popularity SET wd_sitelinks = {} WHERE wd_id = {}'
+
+    # Perform the GET request for the number of sitelinks for this person.
+    async with session.get(url, params=wiki_params) as resp:
+
+        ret = await resp.json()
 
         # Make sure we didn't get more than one sitelink value from the SPARQL endpoint.
         if len(ret['results']['bindings']) != 1:
@@ -58,50 +65,48 @@ def update_sitelinks(all_rows):
 
         wd_sitelinks = int(json_sitelink['value'])
 
-        # Add this tuple to the list to UPDATE.
-        tuple_list.append((wd_sitelinks, wd_id))
-
-    return tuple_list
+    # Return a query
+    return sitelinks_upd_query.format(wd_sitelinks, wd_id)
 
 
-# Return a list of tuples of the format (wd_id, wp_backlinks) to UPDATE when this
-# thread completes.
+# Return a SQL UPDATE query for the number of backlinks.
 #
-# Input: all_rows is a list of tuples, where each tuple is a row in the popularity
-#        database. This is of the format (wd_id, wp_article).
-def update_backlinks(all_rows):
+# Input: row is a tuple of the format (wd_id, wp_article).
+#
+#        session is the aiohttp ClientSession associated with this asynchronous
+#        API request.
+async def update_backlinks(row, session):
 
     # API endpoint for number of backlinks for a given Wikipedia page.
     backlinks_endp = 'http://linkcount.toolforge.org/api/?page={}&project=en.wikipedia.org'
 
-    # Define a list tuples to be UPDATEd once this thread finishes.
-    tuple_list = []
+    # Query to update the number of backlinks for a given person
+    bl_query = 'UPDATE popularity SET wp_backlinks = {} WHERE wd_id = {}'
 
-    for row in all_rows:
-        wd_id = row[0]
-        wp_article = row[1]
+    wd_id = row[0]
+    wp_article = row[1]
 
-        # Request the number of backlinks for this person via a GET request to a backlinks API.
-        response = requests.get(backlinks_endp.format(wp_article))
+    # Request the number of backlinks for this person via a GET request to a backlinks API.
+    async with session.get(backlinks_endp.format(wp_article)) as resp:
+
+        ret = await resp.json()
 
         # If we got a bad status, skip updating it.
-        if response.status_code != HTTPStatus.OK:
+        if resp.status != HTTPStatus.OK:
             print(wp_article, 'could not be requested on backlinks API')
-            continue
+            return ''
 
-        num_backlinks = response.json()['wikilinks']['all']
+        num_backlinks = ret['wikilinks']['all']
 
-        # Add this tuple to the list to UPDATE.
-        tuple_list.append((num_backlinks, wd_id))
+    return bl_query.format(num_backlinks, wd_id)
 
-    return tuple_list
-
-# Return a list of tuples of the format (wd_id, wp_avgviews) to UPDATE when this
-# thread completes.
+# Return a SQL UPDATE query for the average number of pageviews.
 #
-# Input: all_rows is a list of tuples, where each tuple is a row in the popularity
-#        database. This is of the format (wd_id, wp_article).
-def update_avgviews(all_rows):
+# Input: row is a tuple of the format (wd_id, wp_article).
+#
+#        session is the aiohttp ClientSession associated with this asynchronous
+#        API request.
+async def update_avgviews(row, session):
 
     # Today's date in a format for Wikidata REST API.
     current_date = datetime.today().strftime('%Y%m%d')
@@ -115,40 +120,39 @@ def update_avgviews(all_rows):
         'User-Agent': 'Perdle / owen.young0@protonmail.com'
     }
 
-    # Define a list tuples to be UPDATEd once this thread finishes.
-    tuple_list = []
+    # Query to update the number of backlinks for a given person
+    avg_views_query = 'UPDATE popularity SET wp_avgviews = {} WHERE wd_id = {}'
 
-    for row in all_rows:
-        wd_id = row[0]
-        wp_article = row[1]
+    wd_id = row[0]
+    wp_article = row[1]
 
-        # Use Wikimedia REST API to get the number of page views for every month since the
-        # beginning of pageview API data, July 1, 2015.
-        #
-        # If a Wikipedia article is too new, such as https://en.wikipedia.org/wiki/Will_Adam
-        # (at the time of writing, 8/21/2022, this article was too new for statistics), then a
-        # bad status (404) will come back from HTTP.
-        response = requests.get(pageviews_endp.format(wp_article), headers=req_headers_wiki)
+    # Use Wikimedia REST API to get the number of page views for every month since the
+    # beginning of pageview API data, July 1, 2015.
+    #
+    # If a Wikipedia article is too new, such as https://en.wikipedia.org/wiki/Will_Adam
+    # (at the time of writing, 8/21/2022, this article was too new for statistics), then a
+    # bad status (404) will come back from HTTP.
+    async with session.get(pageviews_endp.format(wp_article), headers=req_headers_wiki) as resp:
 
-        if response.status_code != HTTPStatus.OK:
+        ret = await resp.json()
+
+        if resp.status != HTTPStatus.OK:
             print(wp_article, 'could not be found, or is too new for statistics for the requested range. Move on')
-            continue
+            return ''
 
         # Compute a monthly average.
         avg_pageviews = functools.reduce(lambda acc, el: acc + el['views'],
-                                        response.json()['items'], 0) / len(response.json()['items'])
+                                        ret['items'], 0) / len(ret['items'])
 
-        # Add this tuple to the list to UPDATE.
-        tuple_list.append((avg_pageviews, wd_id))
+    return avg_views_query.format(avg_pageviews, wd_id)
 
-    return tuple_list
-
-# Return a list of tuples of the format (wd_id, google_search_num) to UPDATE when this
-# thread completes.
+# Return a SQL UPDATE query for the number of Google search results.
 #
-# Input: all_rows is a list of tuples, where each tuple is a row in the popularity
-#        database. This is of the format (wd_id, wp_article).
-def update_goog_search_num(all_rows):
+# Input: row is a tuple of the format (wd_id, wp_article).
+#
+#        session is the aiohttp ClientSession associated with this asynchronous
+#        API request.
+async def update_goog_search_num(row, session):
 
     # Link for Google search
     google_search = 'https://www.google.com/search?q={}'
@@ -158,34 +162,34 @@ def update_goog_search_num(all_rows):
         'User-Agent': 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.149 Safari/537.36'
     }
 
-    # Define a list tuples to be UPDATEd once this thread finishes.
-    tuple_list = []
+    # Query to update the number of backlinks for a given person
+    search_num_query = 'UPDATE popularity SET google_search_num = {} WHERE wd_id = {}'
 
-    for row in all_rows:
-        wd_id = row[0]
-        wp_article = row[1]
+    wd_id = row[0]
+    wp_article = row[1]
 
-        # Get the number of Google results returned by the name in question. This relies on
-        # the fact that Google puts how many results there are in the "result-stats" div.
-        response = requests.get(google_search.format(wp_article), headers=req_headers_goog)
+    # Get the number of Google results returned by the name in question. This relies on
+    # the fact that Google puts how many results there are in the "result-stats" div.
+    async with session.get(google_search.format(wp_article), headers=req_headers_goog) as resp:
 
-        if response.status_code != HTTPStatus.OK:
+        ret = await resp.text()
+
+        if resp.status != HTTPStatus.OK:
             print(wp_article, 'couldn\'t complete the request to Google. Ouch')
-            continue
+            return ''
 
         # Extract the number of results from the HTML string, separated by commas
-        res = re.search(r'About ([0-9,]+) results', response.text)
+        res = re.search(r'About ([0-9,]+) results', ret)
         if not res or not res.group(1):
+            print(ret)
             raise RuntimeError('Results string not found in Google HTML!')
 
         num_goog_results = int(res.group(1).replace(',', ''))
 
-        # Add this tuple to the list to UPDATE.
-        tuple_list.append((num_goog_results, wd_id))
+    return search_num_query.format(num_goog_results, wd_id)
 
-    return tuple_list
+async def driver():
 
-def driver():
     # Connect to our local popularity database.
     con = sqlite3.connect("pop.db")
     cur = con.cursor()
@@ -196,61 +200,28 @@ def driver():
 
     con.close()
 
-    # Start a thread for each field in the database that needs to be updated.
-    #
-    # We should not have concurrency issues (fingers crossed!) in the database because
-    # each thread is updating a separate column of any given row. The order that these
-    # transactions occur in does not matter, as long as each column is updated.
+    # Asynchronously perform each API request and UPDATE the popularity database.
+    async with aiohttp.ClientSession() as session:
+        tasks = []
 
-    with ThreadPoolExecutor() as executor:
-        sitelinks_thread = executor.submit(update_sitelinks, all_rows=all_db_rows)
-        backlinks_thread = executor.submit(update_backlinks, all_rows=all_db_rows)
-        pageviews_thread = executor.submit(update_avgviews, all_rows=all_db_rows)
-        goog_search_thread = executor.submit(update_goog_search_num, all_rows=all_db_rows)
+        # Ensure 4 futures for each person in the database, where each return is
+        # a string query to be executed.
+        for row in all_db_rows:
+            tasks.append(asyncio.ensure_future(update_sitelinks(row, session)))
+            tasks.append(asyncio.ensure_future(update_backlinks(row, session)))
+            tasks.append(asyncio.ensure_future(update_avgviews(row, session)))
+            tasks.append(asyncio.ensure_future(update_goog_search_num(row, session)))
 
-        # Check each thread for exceptions. Each function returns None.
-        try:
-            # Query to update the number of Wiki sitelinks for a given person
-            sitelinks_upd_query = 'UPDATE popularity SET wd_sitelinks = ? WHERE wd_id = ?'
-            tuple_list = sitelinks_thread.result()
+        # Get the queries from each function and execute them.
+        queries = await asyncio.gather(*tasks)
 
-            # Update the database.
-            cur.executemany(sitelinks_upd_query, tuple_list)
-        except Exception as e:
-            print("Sitelinks thread failed with the following exception:", e)
+        for query in queries:
+            cur.execute(query)
 
-        try:
-            # Query to update the number of backlinks for a given person
-            bl_query = 'UPDATE popularity SET wp_backlinks = ? WHERE wd_id = ?'
-            tuple_list = backlinks_thread.result()
-
-            # Update the database.
-            cur.executemany(bl_query, tuple_list)
-        except Exception as e:
-            print("Backlinks thread failed with the following exception:", e)
-
-        try:
-            # Query to update the number of backlinks for a given person
-            avg_views_query = 'UPDATE popularity SET wp_avgviews = ? WHERE wd_id = ?'
-            tuple_list = pageviews_thread.result()
-
-            # Update the database.
-            cur.executemany(avg_views_query, tuple_list)
-        except Exception as e:
-            print("Pageviews thread failed with the following exception:", e)
-        try:
-            # Query to update the number of backlinks for a given person
-            search_num_query = 'UPDATE popularity SET google_search_num = ? WHERE wd_id = ?'
-            tuple_list = goog_search_thread.result()
-
-            # Update the database.
-            cur.executemany(search_num_query, tuple_list)
-        except Exception as e:
-            print("Google search thread failed with the following exception", e)
-
+    # We're done, commit the transaction, close the database, and return.
     con.commit()
     con.close()
 
     return
 
-driver()
+asyncio.run(driver())
