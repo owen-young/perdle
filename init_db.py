@@ -2,6 +2,7 @@ import sqlite3
 import re
 import aiohttp
 import asyncio
+import functools
 
 async def init_db():
     # Create our popularity database and populate it with People from Wikidata.
@@ -72,11 +73,11 @@ async def init_db():
         }}
     }}
     ORDER BY DESC(?sitelinks)
-    LIMIT 750
+    LIMIT 375
     '''
 
     # Generate a list of queries for each part of the century, as outlined above.
-    query_1500_1900_list = get_formatted_query_list(formatted_1500_1900_query, 1500, 1900, 50)
+    query_1500_1900_list = get_formatted_query_list(formatted_1500_1900_query, 1500, 1900, 25)
 
     # This query is used to split up people born between c. 1900 - 2000, because this query
     # altogether (for all 5000 people) consistently timed out.
@@ -123,25 +124,22 @@ async def init_db():
 
     query_list = [before_1500_query, after_2000_query] + query_1900s_list + query_1500_1900_list
 
-
     # Create a query to insert a row for each person in the SPARQL query.
     #
     # NOTE: Some historical figures don't have exact birth dates. If these
     #       birth dates span across queries (for example Meera,
     #       https://www.wikidata.org/wiki/Q466330, has a birth date of
     #       1498 and 1504), then a sqlite3.IntegrityError is raised.
-    #       I will elect to ignore these exceptions and move on, but the
-    #       reason I don't just put an 'OR IGNORE' clause into my INSERT
-    #       query is because I would like to output which one was a duplicate,
-    #       just in case there is a bug in the database building code.
-    #       Hopefully it works!
+    #       Just ignore on conflict.
     insert_query = '''
-                   INSERT INTO popularity (wd_id, wp_article, wd_sitelinks) VALUES (?, ?, ?)
+                   INSERT OR IGNORE INTO popularity (wd_id, wp_article, wd_sitelinks)
+                   VALUES(?, ?, ?)
                    '''
 
     # Asynchronously perform each SPARQL query and INSERT the results into our
     # SQLite database.
-    async with aiohttp.ClientSession() as session:
+    my_conn = aiohttp.TCPConnector(limit=20)
+    async with aiohttp.ClientSession(connector=my_conn) as session:
         # Create a task for every query.
         tasks = []
 
@@ -149,12 +147,12 @@ async def init_db():
             tasks.append(asyncio.ensure_future(wd_sparql_query(session, query)))
 
         query_results = await asyncio.gather(*tasks)
-        for result in query_results:
-            # Insert a row containing these tuples into our database.
-            try:
-                cur.executemany(insert_query, result)
-            except sqlite3.IntegrityError:
-                print('Duplicate found')
+
+        # Combine these results into one list.
+        flattened_results = functools.reduce(lambda a,b:a+b, query_results)
+
+        # Add these items to our database.
+        cur.executemany(insert_query, flattened_results)
 
     con.commit()
     con.close()

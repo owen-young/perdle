@@ -185,6 +185,9 @@ async def update_avgviews(row, session):
 
 # Return a SQL UPDATE query for the number of Google search results.
 #
+# NOTE: This does not work because Google doesn't let me do >10,000
+#       GET requests to their site. Bummer.
+#
 # Input: row is a tuple of the format (wd_id, wp_article).
 #
 #        session is the aiohttp ClientSession associated with this asynchronous
