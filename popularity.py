@@ -6,6 +6,7 @@ import re
 from http import HTTPStatus
 import aiohttp
 import asyncio
+import json
 
 # Update our database, pop.db, with all popularity statistics. This code runs
 # with the following assumptions:
@@ -18,6 +19,31 @@ import asyncio
 #       attacks. However, I figured since each input is something that is already
 #       in the database, and this takes no user input (it only reads from pop.db),
 #       that threat is not as serious. I could be wrong, but hey.
+
+# Return the maximum of two values from a backlinks dictionary.
+#
+# Input: acc is an accumulator, an integer representing the maximum number of
+#        sitelinks.
+#
+#        el is a dictionary, part of an array of dictionaries returned from the
+#        sitelinks query.
+def sitelinks_max(acc, el):
+    if el['sitelinks']['datatype'] != 'http://www.w3.org/2001/XMLSchema#integer':
+        raise RuntimeError('Incorrect data type returned by sitelinks')
+
+    # Get the integer value from the dictionary.
+    val = int(el['sitelinks']['value'])
+
+    # Return the maximum.
+    if val > acc:
+        return val
+    else:
+        return acc
+
+# Return a series of lists of size `size`.
+def chunks(rows, size):
+    for i in range(0, len(rows), size):
+        yield rows[i:i+size]
 
 # Return a SQL UPDATE query for the number of Wiki sitelinks.
 #
@@ -44,30 +70,27 @@ async def update_sitelinks(row, session):
     wiki_params = {'format': 'json', 'query': sitelinks_query.format(wd_id)}
 
     # Query to update the number of Wiki sitelinks for a given person
-    sitelinks_upd_query = 'UPDATE popularity SET wd_sitelinks = {} WHERE wd_id = {}'
+    sitelinks_upd_query = 'UPDATE popularity SET wd_sitelinks = {} WHERE wd_id = \'{}\''
 
     # Perform the GET request for the number of sitelinks for this person.
     async with session.get(url, params=wiki_params) as resp:
 
-        ret = await resp.json()
+        # Try to get a response from the API. The reason this is in a try/except is because
+        # if we overload the API, I want to see it printed out.
+        try:
+            ret_text = await resp.text()
+            ret = json.loads(ret_text)
+        except Exception as e:
+            print(ret_text)
+            raise e
 
-        # Make sure we didn't get more than one sitelink value from the SPARQL endpoint.
-        if len(ret['results']['bindings']) != 1:
-            raise RuntimeError('More than one sitelinks count:', ret['results']['bindings'])
+        # Get the maximum number of sitelinks for this person. Usually this array is only
+        # one element long, but just in case, get the maximum.
 
-        json_sitelink = ret['results']['bindings'][0]['sitelinks']
-
-        # Get the number of sitelinks from the JSON response. If the response we got was not
-        # an integer, something is wrong and this script must be changed.
-        if json_sitelink['datatype'] != 'http://www.w3.org/2001/XMLSchema#integer':
-            raise RuntimeError('Sitelinks data type is not an integer:',
-                                json_sitelink['datatype'])
-
-        wd_sitelinks = int(json_sitelink['value'])
+        wd_sitelinks = functools.reduce(sitelinks_max, ret['results']['bindings'], 0)
 
     # Return a query
     return sitelinks_upd_query.format(wd_sitelinks, wd_id)
-
 
 # Return a SQL UPDATE query for the number of backlinks.
 #
@@ -81,7 +104,7 @@ async def update_backlinks(row, session):
     backlinks_endp = 'http://linkcount.toolforge.org/api/?page={}&project=en.wikipedia.org'
 
     # Query to update the number of backlinks for a given person
-    bl_query = 'UPDATE popularity SET wp_backlinks = {} WHERE wd_id = {}'
+    bl_query = 'UPDATE popularity SET wp_backlinks = {} WHERE wd_id = \'{}\''
 
     wd_id = row[0]
     wp_article = row[1]
@@ -89,7 +112,14 @@ async def update_backlinks(row, session):
     # Request the number of backlinks for this person via a GET request to a backlinks API.
     async with session.get(backlinks_endp.format(wp_article)) as resp:
 
-        ret = await resp.json()
+        # Try to get a response from the API. The reason this is in a try/except is because
+        # if we overload the API, I want to see it printed out.
+        try:
+            ret_text = await resp.text()
+            ret = json.loads(ret_text)
+        except Exception as e:
+            print(ret_text)
+            raise e
 
         # If we got a bad status, skip updating it.
         if resp.status != HTTPStatus.OK:
@@ -121,7 +151,7 @@ async def update_avgviews(row, session):
     }
 
     # Query to update the number of backlinks for a given person
-    avg_views_query = 'UPDATE popularity SET wp_avgviews = {} WHERE wd_id = {}'
+    avg_views_query = 'UPDATE popularity SET wp_avgviews = {} WHERE wd_id = \'{}\''
 
     wd_id = row[0]
     wp_article = row[1]
@@ -134,7 +164,14 @@ async def update_avgviews(row, session):
     # bad status (404) will come back from HTTP.
     async with session.get(pageviews_endp.format(wp_article), headers=req_headers_wiki) as resp:
 
-        ret = await resp.json()
+        # Try to get a response from the API. The reason this is in a try/except is because
+        # if we overload the API, I want to see it printed out.
+        try:
+            ret_text = await resp.text()
+            ret = json.loads(ret_text)
+        except Exception as e:
+            print(ret_text)
+            raise e
 
         if resp.status != HTTPStatus.OK:
             print(wp_article, 'could not be found, or is too new for statistics for the requested range. Move on')
@@ -163,7 +200,7 @@ async def update_goog_search_num(row, session):
     }
 
     # Query to update the number of backlinks for a given person
-    search_num_query = 'UPDATE popularity SET google_search_num = {} WHERE wd_id = {}'
+    search_num_query = 'UPDATE popularity SET google_search_num = {} WHERE wd_id = \'{}\''
 
     wd_id = row[0]
     wp_article = row[1]
@@ -172,7 +209,14 @@ async def update_goog_search_num(row, session):
     # the fact that Google puts how many results there are in the "result-stats" div.
     async with session.get(google_search.format(wp_article), headers=req_headers_goog) as resp:
 
-        ret = await resp.text()
+        # Try to get a response from the API. The reason this is in a try/except is because
+        # if we overload the API, I want to see it printed out.
+        try:
+            ret_text = await resp.text()
+            ret = json.loads(ret_text)
+        except Exception as e:
+            print(ret_text)
+            raise e
 
         if resp.status != HTTPStatus.OK:
             print(wp_article, 'couldn\'t complete the request to Google. Ouch')
@@ -181,7 +225,7 @@ async def update_goog_search_num(row, session):
         # Extract the number of results from the HTML string, separated by commas
         res = re.search(r'About ([0-9,]+) results', ret)
         if not res or not res.group(1):
-            print(ret)
+            print(ret_text)
             raise RuntimeError('Results string not found in Google HTML!')
 
         num_goog_results = int(res.group(1).replace(',', ''))
@@ -198,25 +242,29 @@ async def driver():
     res = cur.execute('SELECT wd_id, wp_article FROM popularity')
     all_db_rows = res.fetchall()
 
-    con.close()
-
     # Asynchronously perform each API request and UPDATE the popularity database.
-    async with aiohttp.ClientSession() as session:
+    my_conn = aiohttp.TCPConnector(limit=5)
+    async with aiohttp.ClientSession(connector=my_conn) as session:
         tasks = []
 
-        # Ensure 4 futures for each person in the database, where each return is
-        # a string query to be executed.
-        for row in all_db_rows:
-            tasks.append(asyncio.ensure_future(update_sitelinks(row, session)))
-            tasks.append(asyncio.ensure_future(update_backlinks(row, session)))
-            tasks.append(asyncio.ensure_future(update_avgviews(row, session)))
-            tasks.append(asyncio.ensure_future(update_goog_search_num(row, session)))
+        # Split the list of rows into chunks.
+        row_lists = list(chunks(all_db_rows, 2000))
 
-        # Get the queries from each function and execute them.
-        queries = await asyncio.gather(*tasks)
+        # Loop through each chunk, start asynchronous I/O, because I'm getting timeouts :(
+        for chunk in row_lists:
+            # Ensure 4 futures for each person in the database, where each return is
+            # a string query to be executed.
+            for row in chunk:
+                # tasks.append(asyncio.ensure_future(update_sitelinks(row, session)))
+                tasks.append(asyncio.ensure_future(update_backlinks(row, session)))
+                tasks.append(asyncio.ensure_future(update_avgviews(row, session)))
+                # tasks.append(asyncio.ensure_future(update_goog_search_num(row, session)))
 
-        for query in queries:
-            cur.execute(query)
+            # Get the queries from each function and execute them.
+            queries = await asyncio.gather(*tasks)
+
+            for query in queries:
+                cur.execute(query)
 
     # We're done, commit the transaction, close the database, and return.
     con.commit()
